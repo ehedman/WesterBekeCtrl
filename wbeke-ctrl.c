@@ -60,9 +60,9 @@
 
 #define MAX_CHAR            21
 #define MAX_LINES           7
-#define PREHEAT_INTERVAL    2
+#define PREHEAT_INTERVAL    20
 #define STARTMOTOR_INTERVAL 8
-#define RUN_INTERVAL        2
+#define RUN_INTERVAL        30
 #define EXTRA_RUNTIME       10
 #define ON                  1
 #define OFF                 0
@@ -109,7 +109,7 @@ static void printHdr(const char *format , ...)
     for (;len < MAX_CHAR; len++) {
         HdrStr[len] = ' ';
     }
-    
+
     Paint_DrawString_EN(4, 0, HdrStr, &Font16, HdrTxtColor, BLACK);
     // Refresh the picture in RAM to LCD
     LCD_1IN14_Display(BlackImage);
@@ -162,12 +162,12 @@ static void printLog(const char *format , ...)
             if (lines[curLine][0] != (unsigned char)0x0) {
                 Paint_DrawString_EN(1, (curLine+1)*16, lines[curLine], &Font16, WHITE, BLACK);
             }
- 
+
     }
 
     // Refresh the picture in RAM to LCD
     LCD_1IN14_Display(BlackImage);
-    
+
 }
 
 /**
@@ -186,7 +186,7 @@ int initDisplay(void)
     printf("initDisplay params ...\r\n");
     LCD_1IN14_Init(HORIZONTAL);
     LCD_1IN14_Clear(WHITE);
-    
+
     //LCD_SetBacklight(1023);
     UDOUBLE Imagesize = LCD_1IN14_HEIGHT*LCD_1IN14_WIDTH*2;
 
@@ -200,35 +200,25 @@ int initDisplay(void)
     Paint_Clear(WHITE);
     Paint_SetRotate(ROTATE_0);
     Paint_Clear(WHITE);
-    
+
     // /* GUI */
     printf("initDisplay Done!...\r\n");
 
     return 0;
 }
 
-/**
- * Tear down program
- */
-static void wbeke_ctrl_exit(void)
-{
-    free(BlackImage);
-    BlackImage = NULL;
-     
-    DEV_Module_Exit();
-}
 
 /**
  * Check the displays' stop button
  */
 static bool stopButton()
 {
-    return gpio_get(StopButt);
+    return !(gpio_get(StopButt));
 }
 
 /**
  * Break the generators run circuit.
- * The relay assosiated with the Wbeke 
+ * The relay assosiated with the Wbeke
  * control panels' stop switch is connected
  * in serial (NC) with that switch.
  */
@@ -366,7 +356,7 @@ static void gpioInit(void)
  * used to sens the line frequency without
  * any physical intrusion into the the hot
  * power line.
- * This sine wave should the be represented as 
+ * This sine wave should the be represented as
  * a square wave stream (around 2.5v peak) to the
  * PWM B pin of the Pico, i.e a Schmittrigger
  * circuit function to feed GP5.
@@ -378,7 +368,7 @@ static uint16_t measure_frequency(uint gpio, int pollrate)
     static int first;
 
     if (first == 0) {
-        // Only the PWM B pins can be used as inputs. 
+        // Only the PWM B pins can be used as inputs.
         assert(pwm_gpio_to_channel(gpio) == PWM_CHAN_B);
         slice_num = pwm_gpio_to_slice_num(gpio);
 
@@ -392,11 +382,11 @@ static uint16_t measure_frequency(uint gpio, int pollrate)
     }
 
     pwm_set_counter(slice_num, 0);
-  
+
     pwm_set_enabled(slice_num, true);
     sleep_ms(pollrate);
     pwm_set_enabled(slice_num, false);
-    
+
     return (uint16_t)pwm_get_counter(slice_num) * (1000/pollrate);
 
 }
@@ -411,14 +401,14 @@ static void core1Thread()
     int retry = THZDELTA;
 
     multicore_fifo_push_blocking(FLAG_VALUE);
- 
+
     uint32_t g = multicore_fifo_pop_blocking();
- 
+
     if (g == FLAG_VALUE) {
 
         while(1) {
 
-            int f = measure_frequency(HzmeasurePin, 1000); 
+            int f = measure_frequency(HzmeasurePin, 1000);
 
             if (f > HZ_MAX || f < HZ_MIN) {
                 if (retry-- >= 0) {   // Hz drift handling for whatever reason
@@ -428,7 +418,7 @@ static void core1Thread()
                 }
             }
             retry = THZDELTA;
-            
+
             LineFreq = f;
         }
 
@@ -442,7 +432,7 @@ static void core1Thread()
 
 
 /**
- * Check if Wbeke is operational either by means of 
+ * Check if Wbeke is operational either by means of
  * RPM/Frequency checks or check an gpio pin with
  * external circuitry for the same purpose.
 */
@@ -462,7 +452,7 @@ static bool wbekeIsRunning(int pollrate)
     return true;
 
 #else
-    return gpio_get(RunPin);;  
+    return gpio_get(RunPin);;
 #endif
 
 }
@@ -476,19 +466,18 @@ static bool wbekeIsRunning(int pollrate)
  * occur if the engine, for whatever reason,
  * already is running.
  */
-int wbeke_ctrl_run(bool rerun)
+static void wbeke_ctrl_run(bool rerun)
 {
-    int rval = 0;
     int runFlag;
     int mFact = 1;
-    int reTry = 1;
+    int reTry = 0;
     int c = 0;
-    int preHeatInterval = PREHEAT_INTERVAL*1000;
+    int preHeatInterval = PREHEAT_INTERVAL;
     char buf[100];
 
     if (rerun == false) {
         if (initDisplay() != 0) {
-            return -1;
+            return;
         }
         gpioInit();
     }
@@ -519,9 +508,9 @@ int wbeke_ctrl_run(bool rerun)
     if (rerun == false) {
         multicore_launch_core1(core1Thread);
 
-        // Wait for it to start up   
+        // Wait for it to start up
         uint32_t g = multicore_fifo_pop_blocking();
-     
+
         if (g != FLAG_VALUE) {
             printLog("Error: 50Hz detection");
             while(1) sleep_ms(2000);
@@ -543,9 +532,11 @@ int wbeke_ctrl_run(bool rerun)
 
 #if 1
     if (wbekeIsRunning(POLLRATE)) {
-        printLog("Gen already running");
-        printLog("No actions done");
-        return 0;
+        printLog("Line power already");
+        printLog("present. Check shore");
+        printLog("power cord or turn");
+        printLog("off gen manually");
+        return;
     }
 #endif
 
@@ -561,22 +552,33 @@ int wbeke_ctrl_run(bool rerun)
 
     while(runFlag-- > 0 && !wbekeIsRunning(POLLRATE)) {
 
-        printHdr("   Start Attempt %d", reTry++);
+        printHdr("   Start Attempt %d", ++reTry);
 
-        printLog("Preheat: %d seconds", preHeatInterval/1000);
+        printLog("Preheat: %d seconds", preHeatInterval);
         gpio_put(PreheatPin, ON);
 
-        sleep_ms(preHeatInterval);
+        for (int i=0; i < preHeatInterval*4; i++) {
+            if (stopButton()) {
+                runFlag = -2;
+                break;
+            }
+            sleep_ms(250);
+        }
+
+        if (runFlag == -2) {
+            printLog("Stop preheater now");
+            gpio_put(PreheatPin, OFF);
+            break;
+        }
+
         preHeatInterval /=2;
 
         printLog("Cranker: %d seconds", STARTMOTOR_INTERVAL);
         gpio_put(StartPin, ON);
 
-        for (int i=0; i < STARTMOTOR_INTERVAL; i++) {
+        for (int i=0; i < STARTMOTOR_INTERVAL*4; i++) {
 
-            sleep_ms(1000);
-
-            if (wbekeIsRunning(POLLRATE)) {
+            if (stopButton() || wbekeIsRunning(250) ) {
                 break;
             }
         }
@@ -586,25 +588,45 @@ int wbeke_ctrl_run(bool rerun)
         printLog("Stop preheater now");
         gpio_put(PreheatPin, OFF);
 
+        if (stopButton()) {
+            runFlag = -2;
+            break;
+        }
+
         printLog("Is WBEKE running?");
         sleep_ms(2000);
         if (wbekeIsRunning(POLLRATE)) {
             printLog("WBEKE is running!");
             runFlag = 0;
             break;
-        } else {
+        } else if (runFlag > 0) {
             printLog("No. Wait and retry!");
             // The generator may run but not at 50Hz. Make sure the diesel is stopped before retry.
             stopEngine();
-            sleep_ms(25000);
+            for (int i=0; i < 100; i++) {
+                sleep_ms(250);
+                if (stopButton()) {
+                    runFlag = -2;
+                    break;
+                }
+            }
+            if (runFlag == -2) {
+                break;
+            }
+        } else {
+            runFlag = -1;
+            break;
         }
     }
 
-    if (runFlag == -1) {
+    if (runFlag < 0) {
         HdrTxtColor = RED;
-        printHdr("   Start Failed!");
-        printLog("3 attempts failed");
-        rval = 1;
+        if (runFlag == -1) {
+            printHdr("   Start Failed!");
+            printLog("3 attempts failed");
+        } else if (runFlag == -2) {
+            printLog("User aborted start");
+        }
     } else {
         printHdr(" Runtime monitoring");
         runFlag = (RUN_INTERVAL*60)*mFact;
@@ -628,7 +650,7 @@ int wbeke_ctrl_run(bool rerun)
                 if (runFlag < 0) runFlag = 0;
             }
 
-            if (!wbekeIsRunning(POLLRATE) || !stopButton()) {
+            if (!wbekeIsRunning(POLLRATE) || stopButton()) {
                 HdrTxtColor = RED;
                 printHdr("   Premature stop");
                 printLog("Monitoring stopped");
@@ -641,7 +663,7 @@ int wbeke_ctrl_run(bool rerun)
 #ifdef DIRECT_50Hz
                 static int lastHz;
                 if (lastHz != LineFreq) {
-                    printLog("Linefrquency is %dHz",LineFreq);
+                    printHdr("Linefrquency is %dHz",LineFreq);
                     lastHz = LineFreq;
                 }
 #endif
@@ -650,7 +672,7 @@ int wbeke_ctrl_run(bool rerun)
 
         MonFlag = false;
 
-        if (runFlag != -2) {
+        if (runFlag == -1) {
             printHdr("   Runtime expired");
             printLog("Monitoring stopped");
         }
@@ -660,11 +682,9 @@ int wbeke_ctrl_run(bool rerun)
     stopEngine();
     // Leave PSU control to panel buttons
     psuEnable(OFF);
-
-    return rval;
 }
 
-int wbeke_ctrl(void)
+void wbeke_ctrl(void)
 {
 
     bool rerun = false;
@@ -675,25 +695,34 @@ int wbeke_ctrl(void)
         rerun = true;
         tmo = 16;
         while (gpio_get(RerunButt)) {
-            
+
             sleep_ms(250);
+
+#ifdef DIRECT_50Hz
+            if (LineFreq > 10) {
+                // Manually (re)started from wbekes' panel.
+                DEV_SET_PWM(DEF_PWM);
+                static int lastHz;
+                if (lastHz != LineFreq) {
+                    HdrTxtColor = GREEN;
+                    printHdr(" Passive monitoring");
+                    printLog("Linefrquency is %dHz",LineFreq);
+                    lastHz = LineFreq;
+                }
+            } else if (tmo-- <= 0) {
+                DEV_SET_PWM(4);
+            }
+
+#else
             if (tmo-- <= 0) {
                 DEV_SET_PWM(4);
             }
+#endif
         }
         if (gpio_get(DebugPin) == 0 || FlashMode == true) {
             // Enter rom boot mode
-            reset_usb_boot(0,0); 
+            reset_usb_boot(0,0);
         }
     }
-
-    printLog("Program Exit");
-    sleep_ms(30);
-
-
-
-    wbeke_ctrl_exit();
-
-    return 0;
 
 }
