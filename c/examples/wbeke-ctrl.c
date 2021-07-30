@@ -1,13 +1,13 @@
 /*****************************************************************************
 * | File      	:   wbeke-ctrl.c
 * | Author      :   erland@hedmanshome.se
-* | Function    :   WesterBeke Marine Generator Starter and Monitor
+* | Function    :   Westerbeke Marine Generator Starter and Monitor
 * | Info        :   Take relay control over the Start, Preheat and Stop switches
-* | Depends     :   Rasperry Pi Pico, Waveshare Pico LCD 1.14
+* | Depends     :   Rasperry Pi Pico, Waveshare Pico LCD 1.14 V1
 *----------------
 * |	This version:   V1.0
-* | Date        :   2021-07-16
-* | Info        :   Build context is within the Waveshare Pico SDK
+* | Date        :   2021-07-30
+* | Info        :   Build context is within the Waveshare Pico SDK c/examples
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documnetation files (the "Software"), to deal
@@ -37,37 +37,47 @@
 #include "LCD_1in14.h"
 
 /**
- * For debug purposes this app enters
- * flash mode when the rerun button is pressed.
+ * For debug purposes this app enters flash
+ * mode when the reRun button is pressed.
  */
 #define FLASHMODE true
 
 /**
  * Monitor the Genertator run state either from
- * logic gpio level 3.3v or by frequency measurement.
-*/
-#define DIRECT_50Hz
+ * logic gpio level or by frequency measurement.
+ */
+#define DIRECT_HZ
 
-#ifdef DIRECT_50Hz
+#ifdef DIRECT_HZ
 #include <hardware/pwm.h>
 #include <hardware/clocks.h>
 #include <pico/multicore.h>
-#define HZ_MIN              45      // Adjust to the 220V equipment tolerances, typically the charger/inverter.
+#define HZ_MIN              45      // Adjust to equipment tolerances, typically the charger/inverter.
 #define HZ_MAX              65      // Anything outside this band will cause a shutdown of the generator.
 #define THZDELTA            2       // Tolerant time window (x*1250ms) to be out of bound for Hz/min-max (RPM drift)
-#define FLAG_VALUE          123
+#define FLAG_VALUE          123     // Multicore check flag
 #endif
 
+/**
+ * Default timing properties for the generator
+ */
+#define PREHEAT_INTERVAL    20  // Seconds
+#define STARTMOTOR_INTERVAL 8   // Seconds
+#define RUN_INTERVAL        30  // Minutes
+#define EXTRA_RUNTIME       10  // Minutes
+
+/**
+ * Display properties
+ */
 #define MAX_CHAR            21
 #define MAX_LINES           7
-#define PREHEAT_INTERVAL    20
-#define STARTMOTOR_INTERVAL 8
-#define RUN_INTERVAL        30
-#define EXTRA_RUNTIME       10
+#define FONT                Font16
+#define DEF_PWM             50  // Display brightness
+#define LOW_PWM             4
+
+#define POLLRATE            250 // Main loop interval in ms
 #define ON                  1
 #define OFF                 0
-#define DEF_PWM             50
-#define POLLRATE            250
 
 static UWORD *BlackImage;
 static char HdrStr[100]     = { "Header" };
@@ -88,7 +98,7 @@ static const uint RtlsbPin =        26;
 static const uint RtmsbPin =        27;
 static const uint PsuPin =          28;
 static const uint DebugPin =        14;
-#ifdef DIRECT_50Hz
+#ifdef DIRECT_HZ
 static const uint HzmeasurePin =    5;
 static uint16_t LineFreq =          0;
 #endif
@@ -110,7 +120,7 @@ static void printHdr(const char *format , ...)
         HdrStr[len] = ' ';
     }
 
-    Paint_DrawString_EN(4, 0, HdrStr, &Font16, HdrTxtColor, BLACK);
+    Paint_DrawString_EN(4, 0, HdrStr, &FONT, HdrTxtColor, BLACK);
     // Refresh the picture in RAM to LCD
     LCD_1IN14_Display(BlackImage);
 
@@ -155,12 +165,13 @@ static void printLog(const char *format , ...)
         }
     }
 
+    // Print header and text
     for (curLine=0; curLine <MAX_LINES; curLine++) {
             if (curLine == 0) { // Plug in the header first
-                Paint_DrawString_EN(4, 0, HdrStr, &Font16, HdrTxtColor, BLACK);
+                Paint_DrawString_EN(4, 0, HdrStr, &FONT, HdrTxtColor, BLACK);
             }
             if (lines[curLine][0] != (unsigned char)0x0) {
-                Paint_DrawString_EN(1, (curLine+1)*16, lines[curLine], &Font16, WHITE, BLACK);
+                Paint_DrawString_EN(1, (curLine+1)*16, lines[curLine], &FONT, WHITE, BLACK);
             }
 
     }
@@ -172,7 +183,7 @@ static void printLog(const char *format , ...)
 
 /**
  * Display initialization.
- * Display: https://www.waveshare.com/wiki/Pico-LCD-1.14
+ * Display: https://www.waveshare.com/wiki/Pico-LCD-1.14 (V1)
  * SDK; https://www.waveshare.com/w/upload/2/28/Pico_code.7z
  */
 int initDisplay(void)
@@ -211,7 +222,7 @@ int initDisplay(void)
 /**
  * Check the displays' stop button
  */
-static bool stopButton()
+static bool stopButton(void)
 {
     return !(gpio_get(StopButt));
 }
@@ -246,7 +257,7 @@ static void psuEnable(int status)
  * by means of gpio actions, i.e buttons
  * on the display PCB.
  */
-static int addSubTime()
+static int addSubTime(void)
 {
 
     if (gpio_get(AddtimeButt) == false) {
@@ -265,7 +276,7 @@ static int addSubTime()
  * can be used to set default engine
  * run times.
  */
-static int getPresetTime()
+static int getPresetTime(void)
 {
 
     // Read the DIP-switch (two bits)
@@ -348,10 +359,10 @@ static void gpioInit(void)
 
 }
 
-#ifdef DIRECT_50Hz
+#ifdef DIRECT_HZ
 /**
  * This is a free rinning core1 function.
- * Messure the line frequency (~50Hz).
+ * Messure the line frequency (~50/60Hz).
  * An external inductor pickup ring can be
  * used to sens the line frequency without
  * any physical intrusion into the the hot
@@ -361,41 +372,41 @@ static void gpioInit(void)
  * PWM B pin of the Pico, i.e a Schmittrigger
  * circuit function to feed GP5.
  */
-static uint16_t measure_frequency(uint gpio, int pollrate)
+static uint16_t measureFrequency(uint gpio, int pollRate)
 {
 
     uint slice_num;
-    static int first;
+    static bool init;
 
-    if (first == 0) {
+    if (init == false) {
         // Only the PWM B pins can be used as inputs.
         assert(pwm_gpio_to_channel(gpio) == PWM_CHAN_B);
         slice_num = pwm_gpio_to_slice_num(gpio);
 
         // Count once for every cycles the PWM B input is high
         pwm_config cfg = pwm_get_default_config();
-        pwm_config_set_clkdiv_mode(&cfg, PWM_DIV_B_RISING | PWM_DIV_B_FALLING);
-        pwm_config_set_clkdiv(&cfg, 1.f); //set by default, increment count for each rising edge
-        pwm_init(slice_num, &cfg, false);  //false means don't start pwm
+        pwm_config_set_clkdiv_mode(&cfg, PWM_DIV_B_RISING);
+        pwm_config_set_clkdiv(&cfg, 1.f);   // Set by default, increment count for each rising edge
+        pwm_init(slice_num, &cfg, false);   // False means don't start pwm
         gpio_set_function(gpio, GPIO_FUNC_PWM);
-        first = 1;
+        init = true;
     }
 
     pwm_set_counter(slice_num, 0);
 
     pwm_set_enabled(slice_num, true);
-    sleep_ms(pollrate);
+    sleep_ms(pollRate);
     pwm_set_enabled(slice_num, false);
 
-    return (uint16_t)pwm_get_counter(slice_num) * (1000/pollrate);
+    return (uint16_t)pwm_get_counter(slice_num) * (1000/pollRate);
 
 }
 
 /**
- * The thread entry for the measure_frequency() function.
+ * The thread entry for the measureFrequency() function.
  * Be somewhat tolerant for temporary RPM drifts.
  */
-static void core1Thread()
+static void core1Thread(void)
 {
 
     int retry = THZDELTA;
@@ -408,7 +419,7 @@ static void core1Thread()
 
         while(1) {
 
-            int f = measure_frequency(HzmeasurePin, 1000);
+            int f = measureFrequency(HzmeasurePin, 1000);
 
             if (f > HZ_MAX || f < HZ_MIN) {
                 if (retry-- >= 0) {   // Hz drift handling for whatever reason
@@ -436,12 +447,12 @@ static void core1Thread()
  * RPM/Frequency checks or check an gpio pin with
  * external circuitry for the same purpose.
 */
-static bool wbekeIsRunning(int pollrate)
+static bool wbekeIsRunning(int pollRate)
 {
 
-    sleep_ms(pollrate);
+    sleep_ms(pollRate);
 
-#ifdef DIRECT_50Hz
+#ifdef DIRECT_HZ
     if (LineFreq > HZ_MAX || LineFreq < HZ_MIN) {
         if (MonFlag == true) {
             printLog("Out of Hz band f=%d", LineFreq);
@@ -466,16 +477,14 @@ static bool wbekeIsRunning(int pollrate)
  * occur if the engine, for whatever reason,
  * already is running.
  */
-static void wbeke_ctrl_run(bool rerun)
+static void wbekeCtrlRun(bool reRun)
 {
     int runFlag;
     int mFact = 1;
     int reTry = 0;
-    int c = 0;
     int preHeatInterval = PREHEAT_INTERVAL;
-    char buf[100];
 
-    if (rerun == false) {
+    if (reRun == false) {
         if (initDisplay() != 0) {
             return;
         }
@@ -504,15 +513,16 @@ static void wbeke_ctrl_run(bool rerun)
 #endif
 
 
-#ifdef DIRECT_50Hz
-    if (rerun == false) {
+#ifdef DIRECT_HZ
+    if (reRun == false) {
         multicore_launch_core1(core1Thread);
 
         // Wait for it to start up
         uint32_t g = multicore_fifo_pop_blocking();
 
         if (g != FLAG_VALUE) {
-            printLog("Error: 50Hz detection");
+            HdrTxtColor = RED;
+            printLog("%d-%d Hz sens FAILED");
             while(1) sleep_ms(2000);
         } else {
             multicore_fifo_push_blocking(FLAG_VALUE);
@@ -533,9 +543,7 @@ static void wbeke_ctrl_run(bool rerun)
 #if 1
     if (wbekeIsRunning(POLLRATE)) {
         printLog("Line power already");
-        printLog("present. Check shore");
-        printLog("power cord or turn");
-        printLog("off gen manually");
+        printLog("present.");
         return;
     }
 #endif
@@ -630,10 +638,10 @@ static void wbeke_ctrl_run(bool rerun)
     } else {
         printHdr(" Runtime monitoring");
         runFlag = (RUN_INTERVAL*60)*mFact;
-        c = 0;
-        int pollFact = 1000/POLLRATE;
+        int lc = 0;
+        int pollRate = 1000/POLLRATE;
         printLog("Runtime: %d minutes", runFlag/60);
-        runFlag *= pollFact;
+        runFlag *= pollRate;
 
         while(runFlag-- > 0) {
 
@@ -643,10 +651,10 @@ static void wbeke_ctrl_run(bool rerun)
 
             if (timeAdj == 1) {
                 printLog("%d minutes added", EXTRA_RUNTIME);
-                runFlag += EXTRA_RUNTIME*(60*pollFact);
+                runFlag += EXTRA_RUNTIME*(60*pollRate);
             } else if (timeAdj == 2) {
                 printLog("%d minutes subtracted", EXTRA_RUNTIME);
-                runFlag -= EXTRA_RUNTIME*(60*pollFact);
+                runFlag -= EXTRA_RUNTIME*(60*pollRate);
                 if (runFlag < 0) runFlag = 0;
             }
 
@@ -657,17 +665,19 @@ static void wbeke_ctrl_run(bool rerun)
                 runFlag = -2;
                 break;
             }
-            if (c++ > 60*pollFact) {
-                c = 0;
-                printLog("Time left: %d minutes", ((runFlag/pollFact) / 60)+1);
-#ifdef DIRECT_50Hz
+            if (lc++ > 60*pollRate) {
+                lc = 0;
+                printLog("Time left: %d minutes", ((runFlag/pollRate) / 60)+1);
+            }
+#ifdef DIRECT_HZ
+            if (lc > 3*pollRate) {
                 static int lastHz;
                 if (lastHz != LineFreq) {
-                    printHdr("Linefrquency is %dHz",LineFreq);
+                    printHdr("   Monitoring@%dHz",LineFreq);
                     lastHz = LineFreq;
                 }
-#endif
             }
+#endif
         }
 
         MonFlag = false;
@@ -684,21 +694,23 @@ static void wbeke_ctrl_run(bool rerun)
     psuEnable(OFF);
 }
 
+/**
+ * This is the "main" entry
+ */
 void wbeke_ctrl(void)
 {
-
-    bool rerun = false;
+    bool reRun = false;
     int tmo;
 
     while (1) {
-        wbeke_ctrl_run(rerun);
-        rerun = true;
+        wbekeCtrlRun(reRun);
+        reRun = true;
         tmo = 16;
         while (gpio_get(RerunButt)) {
 
             sleep_ms(250);
 
-#ifdef DIRECT_50Hz
+#ifdef DIRECT_HZ
             if (LineFreq > 10) {
                 // Manually (re)started from wbekes' panel.
                 DEV_SET_PWM(DEF_PWM);
@@ -710,12 +722,12 @@ void wbeke_ctrl(void)
                     lastHz = LineFreq;
                 }
             } else if (tmo-- <= 0) {
-                DEV_SET_PWM(4);
+                DEV_SET_PWM(LOW_PWM);
             }
 
 #else
             if (tmo-- <= 0) {
-                DEV_SET_PWM(4);
+                DEV_SET_PWM(LOW_PWM);
             }
 #endif
         }
@@ -724,5 +736,4 @@ void wbeke_ctrl(void)
             reset_usb_boot(0,0);
         }
     }
-
 }
