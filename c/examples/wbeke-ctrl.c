@@ -40,7 +40,7 @@
  * For debug purposes this app enters flash
  * mode when the reRun button is pressed.
  */
-#define FLASHMODE true
+#define FLASHMODE false
 
 /**
  * Monitor the Genertator run state either from
@@ -62,7 +62,7 @@
  * Default timing properties for the generator
  */
 #define PREHEAT_INTERVAL    20  // Seconds
-#define STARTMOTOR_INTERVAL 8   // Seconds
+#define STARTMOTOR_INTERVAL 8   // Seconds (max)
 #define RUN_INTERVAL        30  // Minutes
 #define EXTRA_RUNTIME       10  // Minutes
 
@@ -89,15 +89,18 @@ static bool FlashMode       = FLASHMODE;
 static const uint PreheatPin =      18;
 static const uint StartPin =        19;
 static const uint StopPin =         20;
+#ifndef DIRECT_HZ
 static const uint RunPin =          21;
+#endif
 static const uint StopButt =        15;
 static const uint RerunButt =       17;
 static const uint AddtimeButt =     2;
 static const uint SubtimeButt =     3;
-static const uint RtlsbPin =        26;
-static const uint RtmsbPin =        27;
-static const uint PsuPin =          28;
-static const uint DebugPin =        14;
+static const uint RtlsbPin =        14;
+static const uint RtmsbPin =        26;
+static const uint PsuPin =          6;
+static const uint OffPin =          7;
+static const uint DebugPin =        27;
 #ifdef DIRECT_HZ
 static const uint HzmeasurePin =    5;
 static uint16_t LineFreq =          0;
@@ -186,7 +189,7 @@ static void printLog(const char *format , ...)
  * Display: https://www.waveshare.com/wiki/Pico-LCD-1.14 (V1)
  * SDK; https://www.waveshare.com/w/upload/2/28/Pico_code.7z
  */
-int initDisplay(void)
+static int initDisplay(void)
 {
     DEV_Delay_ms(100);
     printf("initDisplay start\r\n");
@@ -220,11 +223,25 @@ int initDisplay(void)
 
 
 /**
- * Check the displays' stop button
+ * Check the panels' stop and off buttons.
  */
 static bool stopButton(void)
 {
-    return !(gpio_get(StopButt));
+
+    if (gpio_get(StopButt) == OFF) {
+        return true;
+    }
+
+    if (gpio_get(OffPin) == OFF) {
+        /* 
+         * Stop engine and let external
+         * logic turn every thing off.
+         */
+        printLog("User off request");
+        return true;
+    }
+
+    return false;
 }
 
 /**
@@ -319,14 +336,18 @@ static void gpioInit(void)
         gpio_init(StopPin);
         gpio_set_dir(StopPin, GPIO_OUT);
         gpio_put(StopPin, OFF);
-
+#ifndef DIRECT_HZ
         gpio_init(RunPin);
         gpio_set_dir(RunPin, GPIO_IN);
         gpio_pull_up(RunPin);
+#endif
 
         gpio_init(StopButt);
         gpio_set_dir(StopButt, GPIO_IN);
         gpio_pull_up(StopButt);
+
+        gpio_init(OffPin);
+        gpio_set_dir(OffPin, GPIO_IN);
 
         gpio_init(RerunButt);
         gpio_set_dir(RerunButt, GPIO_IN);
@@ -339,7 +360,6 @@ static void gpioInit(void)
         gpio_init(SubtimeButt);
         gpio_set_dir(SubtimeButt, GPIO_IN);
         gpio_pull_up(SubtimeButt);
-
 
         gpio_init(RtlsbPin);
         gpio_set_dir(RtlsbPin, GPIO_IN);
@@ -732,7 +752,7 @@ void wbeke_ctrl(void)
 #endif
         }
         if (gpio_get(DebugPin) == 0 || FlashMode == true) {
-            // Enter rom boot mode
+            // Enter rom boot mode and await new firmware
             reset_usb_boot(0,0);
         }
     }
