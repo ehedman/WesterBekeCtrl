@@ -6,7 +6,7 @@
 * | Depends     :   Rasperry Pi Pico, Waveshare Pico LCD 1.14 V1
 *----------------
 * |	This version:   V1.0
-* | Date        :   2021-07-30
+* | Date        :   2021-08-06
 * | Info        :   Build context is within the Waveshare Pico SDK c/examples
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -35,6 +35,13 @@
 #include <pico/bootrom.h>
 #include "EPD_Test.h"
 #include "LCD_1in14.h"
+#include "wb50bcd.h"
+
+/**
+ * Version string in splash screen
+ */
+#define VERSION "V1.0"
+#define GTYPE   "BCD"
 
 /**
  * For debug purposes this app enters flash
@@ -61,10 +68,10 @@
 /**
  * Default timing properties for the generator
  */
-#define PREHEAT_INTERVAL    20  // Seconds
+#define PREHEAT_INTERVAL    20  // Seconds (max)
 #define STARTMOTOR_INTERVAL 8   // Seconds (max)
 #define RUN_INTERVAL        30  // Minutes
-#define EXTRA_RUNTIME       10  // Minutes
+#define EXTRA_RUNTIME       10  // Minutes +/- increments
 
 /**
  * Display properties
@@ -72,38 +79,39 @@
 #define MAX_CHAR            21
 #define MAX_LINES           7
 #define FONT                Font16
-#define DEF_PWM             50  // Display brightness
+#define DEF_PWM             50      // Display brightness
 #define LOW_PWM             4
+#define HDR_OK              GREEN
+#define HDR_ERROR           0xF8C0  // Reddish
 
-#define POLLRATE            250 // Main loop interval in ms
+#define POLLRATE            250     // Main loop interval in ms
 #define ON                  1
 #define OFF                 0
 
 static UWORD *BlackImage;
 static char HdrStr[100]     = { "Header" };
-static int HdrTxtColor      = GREEN;
+static int HdrTxtColor      = HDR_OK;
 static bool FirstLogline    = true;
 static bool MonFlag         = false;
-static bool FlashMode       = FLASHMODE;
+static bool FirmwareMode    = FLASHMODE;
 
-static const uint PreheatPin =      18;
-static const uint StartPin =        19;
-static const uint StopPin =         20;
-#ifndef DIRECT_HZ
-static const uint RunPin =          21;
-#endif
-static const uint StopButt =        15;
-static const uint RerunButt =       17;
-static const uint AddtimeButt =     2;
-static const uint SubtimeButt =     3;
-static const uint RtlsbPin =        14;
-static const uint RtmsbPin =        26;
-static const uint PsuPin =          6;
-static const uint OffPin =          7;
-static const uint DebugPin =        27;
+static const uint PreheatPin =      18; // Relay NO
+static const uint StartPin =        19; // Relay NO
+static const uint StopPin =         20; // Relay NC
+static const uint StopButt =        15; // On LCD PCB
+static const uint RerunButt =       17; // On LCD PCB
+static const uint AddtimeButt =     2;  // On LCD PCB
+static const uint SubtimeButt =     3;  // On LCD PCB
+static const uint RtlsbPin =        14; // User DIP switch 0
+static const uint RtmsbPin =        26; // User DIP switch 1
+static const uint FirmwarePin =     27; // User DIP switch 3
+static const uint OffPin =          7;  // On control Panel
+static const uint PsuPin =          6;  // Persistent power signal
 #ifdef DIRECT_HZ
-static const uint HzmeasurePin =    5;
-static uint16_t LineFreq =          0;
+static const uint HzmeasurePin =    5;  // Square wave 50/60Hz feed
+static uint16_t LineFreq =          0;  // Live frequency
+#else
+static const uint RunPin =          21; // GPIO level logic feed
 #endif
 
 /**
@@ -111,19 +119,21 @@ static uint16_t LineFreq =          0;
  */
 static void printHdr(const char *format , ...)
 {
-    int len = 0;
+    char txt[MAX_CHAR*2];
     va_list arglist;
-    va_start( arglist, format );
-    memset(HdrStr, 0, sizeof(HdrStr));
-    vsprintf(HdrStr, format, arglist );
-    va_end( arglist );
 
-    len = strlen(HdrStr);
-    for (;len < MAX_CHAR; len++) {
-        HdrStr[len] = ' ';
-    }
+    va_start(arglist, format);
+    vsprintf(txt, format, arglist);
+    va_end(arglist);
 
+    txt[MAX_CHAR] = '\0';
+
+    // Center align and trim with white spaces
+    int padlen = (MAX_CHAR - strlen(txt)) / 2;
+    sprintf(HdrStr, "%*s%s%*s", padlen, "", txt, padlen, "");
+  
     Paint_DrawString_EN(4, 0, HdrStr, &FONT, HdrTxtColor, BLACK);
+
     // Refresh the picture in RAM to LCD
     LCD_1IN14_Display(BlackImage);
 
@@ -136,9 +146,9 @@ static void printLog(const char *format , ...)
 {
     static char buf[100];
     va_list arglist;
-    va_start( arglist, format );
-    vsprintf(buf, format, arglist );
-    va_end( arglist );
+    va_start(arglist, format);
+    vsprintf(buf, format, arglist);
+    va_end(arglist);
 
     int curLine;
     static char lines[MAX_LINES][MAX_CHAR+1];
@@ -184,6 +194,13 @@ static void printLog(const char *format , ...)
 
 }
 
+static void clearLog(void)
+{
+    HdrTxtColor = HDR_OK;
+    FirstLogline = true;
+    Paint_Clear(WHITE);
+}
+
 /**
  * Display initialization.
  * Display: https://www.waveshare.com/wiki/Pico-LCD-1.14 (V1)
@@ -193,29 +210,30 @@ static int initDisplay(void)
 {
     DEV_Delay_ms(100);
     printf("initDisplay start\r\n");
-    if(DEV_Module_Init()!=0){
+
+    if (DEV_Module_Init() != 0) {
         return -1;
     }
-    /* LCD Init */
+
+    // LCD Init
     printf("initDisplay params ...\r\n");
     LCD_1IN14_Init(HORIZONTAL);
     LCD_1IN14_Clear(WHITE);
 
-    //LCD_SetBacklight(1023);
     UDOUBLE Imagesize = LCD_1IN14_HEIGHT*LCD_1IN14_WIDTH*2;
 
     if((BlackImage = (UWORD *)malloc(Imagesize)) == NULL) {
         printf("initDisplay Failed to apply for black memory...\r\n");
         return -1;
     }
+
     // Create a new image cache named IMAGE_RGB and fill it with white
-    Paint_NewImage((UBYTE *)BlackImage,LCD_1IN14.WIDTH,LCD_1IN14.HEIGHT, 0, WHITE);
+    Paint_NewImage((UBYTE *)BlackImage, LCD_1IN14.WIDTH, LCD_1IN14.HEIGHT, 0, WHITE);
     Paint_SetScale(65);
     Paint_Clear(WHITE);
     Paint_SetRotate(ROTATE_0);
     Paint_Clear(WHITE);
 
-    // /* GUI */
     printf("initDisplay Done!...\r\n");
 
     return 0;
@@ -223,7 +241,7 @@ static int initDisplay(void)
 
 
 /**
- * Check the panels' stop and off buttons.
+ * Check the displays' stop button and the panels' off button.
  */
 static bool stopButton(void)
 {
@@ -264,7 +282,7 @@ static void stopEngine(void)
  * That is, the user cannot turn the
  * Pico off for a while.
  */
-static void psuEnable(int status)
+static void persistentPsu(int status)
 {
     gpio_put(PsuPin, status);
 }
@@ -289,9 +307,9 @@ static int addSubTime(void)
 }
 
 /**
- * An external mini-dip switch block
- * can be used to set default engine
- * run times.
+ * An external user accesable mini-dip
+ * switch block can be used to set default
+ * engine run times.
  */
 static int getPresetTime(void)
 {
@@ -311,9 +329,9 @@ static int getPresetTime(void)
 
     if (res > 0) {
         mFact = res+1;
-        printLog("Runtime = %d minutes", mFact*RUN_INTERVAL);
+        printLog("Runtime: %d minutes", mFact*RUN_INTERVAL);
     } else {
-        printLog("Runtime = %d minutes", RUN_INTERVAL);
+        printLog("Runtime: %d minutes", RUN_INTERVAL);
     }
 
     return mFact;
@@ -373,9 +391,9 @@ static void gpioInit(void)
         gpio_set_dir(PsuPin, GPIO_OUT);
         gpio_put(PsuPin, OFF);
 
-        gpio_init(DebugPin);
-        gpio_set_dir(DebugPin, GPIO_IN);
-        gpio_pull_up(DebugPin);
+        gpio_init(FirmwarePin);
+        gpio_set_dir(FirmwarePin, GPIO_IN);
+        gpio_pull_up(FirmwarePin);
 
 }
 
@@ -383,11 +401,11 @@ static void gpioInit(void)
 /**
  * This is a free rinning core1 function.
  * Messure the line frequency (~50/60Hz).
- * An external inductor pickup ring can be
- * used to sens the line frequency without
+ * An external Closed Type CT (current transformer)
+ * can be used to sens the line frequency without
  * any physical intrusion into the the hot
  * power line.
- * This sine wave should the be represented as
+ * This sine wave should then be represented as
  * a square wave stream (around 2.5v peak) to the
  * PWM B pin of the Pico, i.e a Schmittrigger
  * circuit function to feed GP5.
@@ -450,7 +468,7 @@ static void core1Thread(void)
             }
             retry = THZDELTA;
 
-            LineFreq = f;
+            LineFreq = f;   // Enter result to global space
         }
 
     } else {
@@ -483,7 +501,7 @@ static bool wbekeIsRunning(int pollRate)
     return true;
 
 #else
-    return gpio_get(RunPin);;
+    return gpio_get(RunPin);
 #endif
 
 }
@@ -511,18 +529,33 @@ static void wbekeCtrlRun(bool reRun)
         gpioInit();
     }
 
+    HdrTxtColor = HDR_OK;
+    FirstLogline = true;
+
     DEV_SET_PWM(DEF_PWM);
+
+    // Splash screen
+    Paint_DrawImage(wb50bcd,0,0,240,135);
+    Paint_DrawString_EN(2, 118, VERSION , &FONT, WHITE, BLACK);
+    Paint_DrawString_EN(194, 118, GTYPE , &FONT, WHITE, BLACK);
+    LCD_1IN14_Display(BlackImage);
+    for (int i=0; i < 16; i++) {    // Allow abort
+        if (gpio_get(StopButt) == false) {
+            Paint_Clear(WHITE);
+            HdrTxtColor = HDR_ERROR;
+            printHdr("User abort");
+            printLog("Start aborted!");
+            return;
+        }
+        sleep_ms(250);
+    }
 
     Paint_Clear(WHITE);
 
-    HdrTxtColor = GREEN;
-    FirstLogline = true;
-
     // Leave PSU control to panel buttons
-    psuEnable(OFF);
+    persistentPsu(OFF);
 
-    printHdr("WBEKE Generator Start");
-    sleep_ms(3000);
+    printHdr("%s Generator Start", GTYPE);
 
 #if 0
     for (int i = 0; i < MAX_LINES; i++)
@@ -541,7 +574,7 @@ static void wbekeCtrlRun(bool reRun)
         uint32_t g = multicore_fifo_pop_blocking();
 
         if (g != FLAG_VALUE) {
-            HdrTxtColor = RED;
+            HdrTxtColor = HDR_ERROR;
             printLog("%d-%d Hz sens FAILED");
             while(1) sleep_ms(2000);
         } else {
@@ -568,19 +601,19 @@ static void wbekeCtrlRun(bool reRun)
     }
 #endif
 
-    // We have control over Picos' power (not panel buttons)
-    psuEnable(ON);
+    // We have control over Picos' power (not control panel buttons)
+    persistentPsu(ON);
 
     stopEngine();   // Always be sure engine is stopped before using preheater and cranker
 
-    // Get preset time
+    // Get preset runtime
     mFact = getPresetTime();
 
     runFlag = 3;    // retry
 
     while(runFlag-- > 0 && !wbekeIsRunning(POLLRATE)) {
 
-        printHdr("   Start Attempt %d", ++reTry);
+        printHdr("Start Attempt %d/3", ++reTry);
 
         printLog("Preheat: %d seconds", preHeatInterval);
         gpio_put(PreheatPin, ON);
@@ -621,15 +654,15 @@ static void wbekeCtrlRun(bool reRun)
             break;
         }
 
-        printLog("Is WBEKE running?");
+        printLog("Is %s running?", GTYPE);
         sleep_ms(2000);
         if (wbekeIsRunning(POLLRATE)) {
-            printLog("WBEKE is running!");
+            printLog("%s is running!", GTYPE);
             runFlag = 0;
             break;
         } else if (runFlag > 0) {
-            printLog("No. Wait and retry!");
-            // The generator may run but not at 50Hz. Make sure the diesel is stopped before retry.
+            printLog("No. Pause and retry!");
+            // The generator may run but not at proper Hz. Make sure the diesel is stopped before retry.
             stopEngine();
             for (int i=0; i < 100; i++) {
                 sleep_ms(250);
@@ -638,6 +671,8 @@ static void wbekeCtrlRun(bool reRun)
                     break;
                 }
             }
+            clearLog();
+
             if (runFlag == -2) {
                 break;
             }
@@ -648,15 +683,16 @@ static void wbekeCtrlRun(bool reRun)
     }
 
     if (runFlag < 0) {
-        HdrTxtColor = RED;
+        HdrTxtColor = HDR_ERROR;
         if (runFlag == -1) {
-            printHdr("   Start Failed!");
+            printHdr("Start Failed!");
             printLog("3 attempts failed");
         } else if (runFlag == -2) {
             printLog("User aborted start");
         }
     } else {
-        printHdr(" Runtime monitoring");
+        clearLog();
+        printHdr("Runtime monitoring");
         runFlag = (RUN_INTERVAL*60)*mFact;
         int lc = 0;
         int pollRate = 1000/POLLRATE;
@@ -678,13 +714,18 @@ static void wbekeCtrlRun(bool reRun)
                 if (runFlag < 0) runFlag = 0;
             }
 
+            if ( timeAdj > 0) { // Force log update
+                lc = 60*pollRate;
+            }
+
             if (!wbekeIsRunning(POLLRATE) || stopButton()) {
-                HdrTxtColor = RED;
-                printHdr("   Premature stop");
+                HdrTxtColor = HDR_ERROR;
+                printHdr("Premature stop");
                 printLog("Monitoring stopped");
                 runFlag = -2;
                 break;
             }
+
             if (lc++ > 60*pollRate) {
                 lc = 0;
                 printLog("Time left: %d minutes", ((runFlag/pollRate) / 60)+1);
@@ -693,7 +734,7 @@ static void wbekeCtrlRun(bool reRun)
             if (lc > 3*pollRate) {
                 static int lastHz;
                 if (lastHz != LineFreq) {
-                    printHdr("   Monitoring@%dHz",LineFreq);
+                    printHdr("Monitoring@%dHz",LineFreq);
                     lastHz = LineFreq;
                 }
             }
@@ -703,15 +744,15 @@ static void wbekeCtrlRun(bool reRun)
         MonFlag = false;
 
         if (runFlag == -1) {
-            printHdr("   Runtime expired");
+            printHdr("Runtime expired");
             printLog("Monitoring stopped");
         }
 
     }
 
     stopEngine();
-    // Leave PSU control to panel buttons
-    psuEnable(OFF);
+    // Leave PSU control to control panel buttons
+    persistentPsu(OFF);
 }
 
 /**
@@ -736,9 +777,9 @@ void wbeke_ctrl(void)
                 DEV_SET_PWM(DEF_PWM);
                 static int lastHz;
                 if (lastHz != LineFreq) {
-                    HdrTxtColor = GREEN;
-                    printHdr(" Passive monitoring");
-                    printLog("Linefrquency is %dHz",LineFreq);
+                    HdrTxtColor = HDR_OK;
+                    printHdr("Passive monitoring");
+                    printLog("Line frquency is %dHz", LineFreq);
                     lastHz = LineFreq;
                 }
             } else if (tmo-- <= 0) {
@@ -746,12 +787,21 @@ void wbeke_ctrl(void)
             }
 
 #else
-            if (tmo-- <= 0) {
+            if (gpio_get(RunPin) == true) {
+                DEV_SET_PWM(DEF_PWM);
+                HdrTxtColor = HDR_OK;
+                printHdr("Passive monitoring");
+                printLog("Generator running #%d", tmo);
+            } else if (tmo-- <= 0) {
                 DEV_SET_PWM(LOW_PWM);
             }
 #endif
+            if (gpio_get(StopButt) == false || gpio_get(AddtimeButt) == false || gpio_get(SubtimeButt) == false) {
+                DEV_SET_PWM(DEF_PWM);   // React to user activity
+                tmo = 16;
+            }
         }
-        if (gpio_get(DebugPin) == 0 || FlashMode == true) {
+        if (gpio_get(FirmwarePin) == 0 || FirmwareMode == true) {
             // Enter rom boot mode and await new firmware
             reset_usb_boot(0,0);
         }
