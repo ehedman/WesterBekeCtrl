@@ -36,12 +36,7 @@
 #include "EPD_Test.h"
 #include "LCD_1in14.h"
 #include "wb50bcd.h"
-
-/**
- * Version string in splash screen
- */
-#define VERSION "V1.0"
-#define GTYPE   "BCD"
+#include "wbeke-ctrl.h"
 
 /**
  * For debug purposes this app enters flash
@@ -93,6 +88,9 @@ static char HdrStr[100]     = { "Header" };
 static int HdrTxtColor      = HDR_OK;
 static bool FirstLogline    = true;
 static bool MonFlag         = false;
+static bool RemoteEnable    = false;
+static bool RemoteRerun     = false;
+static bool RemoteStop      = false;
 static bool FirmwareMode    = FLASHMODE;
 
 static const uint PreheatPin =      18; // Relay NO
@@ -142,7 +140,7 @@ static void printHdr(const char *format , ...)
 /**
  * Text display with colored fixed header and scrolled text.
  */
-static void printLog(const char *format , ...)
+void printLog(const char *format , ...)
 {
     static char buf[100];
     va_list arglist;
@@ -160,7 +158,8 @@ static void printLog(const char *format , ...)
         FirstLogline = false;
     }
 
-    printf("%s\r\n", buf);
+    // Notify any remote client
+    atprintf("%s\r\n", buf);
 
     for (curLine=0; curLine <MAX_LINES; curLine++) {
         if (lines[curLine][0] == (unsigned char)0x0) {
@@ -208,33 +207,26 @@ static void clearLog(void)
  */
 static int initDisplay(void)
 {
-    DEV_Delay_ms(100);
-    printf("initDisplay start\r\n");
+    //DEV_Delay_ms(100);
 
     if (DEV_Module_Init() != 0) {
         return -1;
     }
 
     // LCD Init
-    printf("initDisplay params ...\r\n");
     LCD_1IN14_Init(HORIZONTAL);
     LCD_1IN14_Clear(WHITE);
 
     UDOUBLE Imagesize = LCD_1IN14_HEIGHT*LCD_1IN14_WIDTH*2;
 
     if((BlackImage = (UWORD *)malloc(Imagesize)) == NULL) {
-        printf("initDisplay Failed to apply for black memory...\r\n");
         return -1;
     }
 
     // Create a new image cache named IMAGE_RGB and fill it with white
     Paint_NewImage((UBYTE *)BlackImage, LCD_1IN14.WIDTH, LCD_1IN14.HEIGHT, 0, WHITE);
     Paint_SetScale(65);
-    Paint_Clear(WHITE);
     Paint_SetRotate(ROTATE_0);
-    Paint_Clear(WHITE);
-
-    printf("initDisplay Done!...\r\n");
 
     return 0;
 }
@@ -448,6 +440,7 @@ static void core1Thread(void)
 {
 
     int retry = THZDELTA;
+    int8_t byte = 0;
 
     multicore_fifo_push_blocking(FLAG_VALUE);
 
@@ -456,6 +449,25 @@ static void core1Thread(void)
     if (g == FLAG_VALUE) {
 
         while(1) {
+
+            if (RemoteEnable == true) { // Allow interaction if stopped
+                if (byte = getchar_uart()) {
+
+                    switch (serialChat(byte))
+                    {
+                        case 1:
+                            RemoteStop = true;
+                        break;
+                        case 2:
+                            RemoteRerun = true;
+                        break;
+                        default:
+                        break;
+                    }
+                    continue;
+                }
+                sleep_ms(4);
+            }
 
             int f = measureFrequency(HzmeasurePin, 1000);
 
@@ -531,6 +543,9 @@ static void wbekeCtrlRun(bool reRun)
 
     HdrTxtColor = HDR_OK;
     FirstLogline = true;
+    RemoteRerun = false;
+    RemoteEnable = true;
+    RemoteStop = false;  
 
     DEV_SET_PWM(DEF_PWM);
 
@@ -539,8 +554,42 @@ static void wbekeCtrlRun(bool reRun)
     Paint_DrawString_EN(2, 118, VERSION , &FONT, WHITE, BLACK);
     Paint_DrawString_EN(194, 118, GTYPE , &FONT, WHITE, BLACK);
     LCD_1IN14_Display(BlackImage);
+
+
+#ifdef DIRECT_HZ
+    if (reRun == false) {
+        multicore_launch_core1(core1Thread);
+
+        // Wait for it to start up
+        uint32_t g = multicore_fifo_pop_blocking();
+
+        if (g != FLAG_VALUE) {
+            HdrTxtColor = HDR_ERROR;
+            printLog("%d-%d Hz sens FAILED");
+            while(1) sleep_ms(2000);
+        } else {
+            multicore_fifo_push_blocking(FLAG_VALUE);
+            sleep_ms(2000);
+        }
+        // Initialize a client chat (full)
+        serialChatInit(true);
+    } else {
+        // Initialize a client chat (limited)
+        serialChatInit(false);
+    }
+
+
+#if 0
+    while(1) {
+        sleep_ms(250);
+        printLog("LineFreq=%d", LineFreq);
+    }
+#endif
+
+#endif
+
     for (int i=0; i < 16; i++) {    // Allow abort
-        if (gpio_get(StopButt) == false) {
+        if (gpio_get(StopButt) == false || RemoteStop == true) {
             Paint_Clear(WHITE);
             HdrTxtColor = HDR_ERROR;
             printHdr("User abort");
@@ -557,6 +606,10 @@ static void wbekeCtrlRun(bool reRun)
 
     printHdr("%s Generator Start", GTYPE);
 
+#ifdef DIRECT_HZ
+    printLog("%d-%d Hz sens started", HZ_MIN, HZ_MAX);
+#endif
+
 #if 0
     for (int i = 0; i < MAX_LINES; i++)
     {
@@ -566,32 +619,6 @@ static void wbekeCtrlRun(bool reRun)
 #endif
 
 
-#ifdef DIRECT_HZ
-    if (reRun == false) {
-        multicore_launch_core1(core1Thread);
-
-        // Wait for it to start up
-        uint32_t g = multicore_fifo_pop_blocking();
-
-        if (g != FLAG_VALUE) {
-            HdrTxtColor = HDR_ERROR;
-            printLog("%d-%d Hz sens FAILED");
-            while(1) sleep_ms(2000);
-        } else {
-            multicore_fifo_push_blocking(FLAG_VALUE);
-            printLog("%d-%d Hz sens started", HZ_MIN, HZ_MAX);
-            sleep_ms(1500);
-        }
-    }
-
-#if 0
-    while(1) {
-        sleep_ms(250);
-        printLog("LineFreq=%d", LineFreq);
-    }
-#endif
-
-#endif
 
 #if 1
     if (wbekeIsRunning(POLLRATE)) {
@@ -610,6 +637,9 @@ static void wbekeCtrlRun(bool reRun)
     mFact = getPresetTime();
 
     runFlag = 3;    // retry
+
+    atprintf("** remote input disabled during engine runtime **\r\n");
+    RemoteEnable = false;
 
     while(runFlag-- > 0 && !wbekeIsRunning(POLLRATE)) {
 
@@ -767,9 +797,16 @@ void wbeke_ctrl(void)
         wbekeCtrlRun(reRun);
         reRun = true;
         tmo = 16;
+        RemoteEnable = true;
+        atprintf("** remote input enabled **\r\n");
+
         while (gpio_get(RerunButt)) {
 
             sleep_ms(250);
+
+            if (RemoteRerun == true) {
+                break;
+            }
 
 #ifdef DIRECT_HZ
             if (LineFreq > 10) {
@@ -801,9 +838,15 @@ void wbeke_ctrl(void)
                 tmo = 16;
             }
         }
+
+#ifdef DIRECT_HZ
+        serialChatRestart();
+#endif
+
         if (gpio_get(FirmwarePin) == 0 || FirmwareMode == true) {
             // Enter rom boot mode and await new firmware
             reset_usb_boot(0,0);
         }
     }
 }
+
