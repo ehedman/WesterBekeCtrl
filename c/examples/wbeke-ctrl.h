@@ -9,7 +9,7 @@
 
 extern void printLog(const char *format , ...);
 extern void serialChatInit(bool how);
-extern void serialChatRestart(void);
+extern void serialChatRestart(bool full);
 extern int serialChat(uint8_t byte);
 extern void atprintf(const char *format , ...);
 extern uint8_t getchar_uart(void);

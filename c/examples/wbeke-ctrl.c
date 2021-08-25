@@ -6,7 +6,7 @@
 * | Depends     :   Rasperry Pi Pico, Waveshare Pico LCD 1.14 V1
 *----------------
 * |	This version:   V1.0
-* | Date        :   2021-08-06
+* | Date        :   2021-08-22
 * | Info        :   Build context is within the Waveshare Pico SDK c/examples
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -207,8 +207,6 @@ static void clearLog(void)
  */
 static int initDisplay(void)
 {
-    //DEV_Delay_ms(100);
-
     if (DEV_Module_Init() != 0) {
         return -1;
     }
@@ -555,7 +553,6 @@ static void wbekeCtrlRun(bool reRun)
     Paint_DrawString_EN(194, 118, GTYPE , &FONT, WHITE, BLACK);
     LCD_1IN14_Display(BlackImage);
 
-
 #ifdef DIRECT_HZ
     if (reRun == false) {
         multicore_launch_core1(core1Thread);
@@ -840,7 +837,7 @@ void wbeke_ctrl(void)
         }
 
 #ifdef DIRECT_HZ
-        serialChatRestart();
+        serialChatRestart(false);
 #endif
 
         if (gpio_get(FirmwarePin) == 0 || FirmwareMode == true) {
