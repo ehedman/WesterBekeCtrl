@@ -330,13 +330,12 @@ void atprintf(const char *format , ...)
 
     len = strlen(txt);
 
-    sleep_ms(40);  // Avoid ESP8266 busy feedback
-
     if (len > 0 && len < sizeof(txt)/2 && checkConnection(NULL) == true) {
-
+        sleep_ms(200);  // Avoid ESP8266 busy feedback
         printf("AT+CIPSEND=0,%d\r\n", len);
         sleep_ms(40);
         uart_write_blocking(UART_ID, txt, len);
+        sleep_ms(40);
     }
 }
 
@@ -353,7 +352,6 @@ void serialChatInit(bool how)
     printf("AT\r\n");
     sleep_ms(100);
     printf("ATE0\r\n");
-    sleep_ms(100);
     sleep_ms(100);
     printf("AT+CWMODE=3\r\n");
     sleep_ms(100);
@@ -442,7 +440,7 @@ static void doHelp()
 {
     static char hbuf[NELEMS(userCmds)*50];
 
-    sleep_ms(400);
+    sleep_ms(1000);
     if (!strlen(hbuf)) {
         for (int i=0; i <NELEMS(userCmds); i++) {
             strcat(hbuf, userCmds[i][0]);
@@ -593,7 +591,7 @@ static int checkResonse(char *str)
     static char buf[200];
     static int cifsrIndx;
 
-    sleep_ms(100);
+    sleep_ms(300);
 
     // GETIP
     if (!strncmp(str, "+CIFSR:",7)) {  
@@ -603,7 +601,7 @@ static int checkResonse(char *str)
             atprintf("\r\n%s", buf); 
             cifsrIndx = 0;
             *buf = '\0';
-            return 300;
+            return 1000;
         }
         return -1;  
         
@@ -611,18 +609,18 @@ static int checkResonse(char *str)
     // SCAN
     else if (!strncmp(str, "+CWLAP:",7)) {
         atprintf("\r\n%s", &str[7]);
-        sleep_ms(300);
+        sleep_ms(500);
         return -1;
     
     } 
     // GETAP
     else if (!strncmp(str, "+CWSAP_CUR:",11)) {
         atprintf("\r\n%s", &str[11]); 
-        return 300;         
+        return 1000;         
     }
 
     if (!strncmp("+IPD,0,2:", str, 9)) { // CR/LF
-        prompt(300);
+        prompt(1000);
     }
 
     return  -1;
