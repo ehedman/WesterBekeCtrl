@@ -31,8 +31,9 @@ The folder structure of this application is ment to be added to the Waveshare SD
 <img src="http://hedmanshome.se/wbDev2.png" width=100%>
 - Installed in the vessel.
 <img src="http://hedmanshome.se/wbFinal.png" width=720px>
-- Controlbox for the display panel (the pico+display+wifi) that also connects to the vessels power management systems' relay output that alarms for a low battery charge level.
+- Controlbox for the display panel (the pico+display+wifi) that also connects to the vessels power management systems' relay output that alarms for a low battery charge level. 
+The USB connector can be connected to the vessesls Linux sysem for firmware upgrades (.uf2 files) if the "test" mini-dip switch is on.
 <img src="http://hedmanshome.se/wbCtrlBox.png" width=720px>
-- Relaybox in the engine compartmentthat connects to the Westerbeke control panel.
+- Relaybox in the engine compartment that connects to the Westerbeke standard control panel.
 <img src="http://hedmanshome.se/wbRelayBox.png" width=100%>
 
