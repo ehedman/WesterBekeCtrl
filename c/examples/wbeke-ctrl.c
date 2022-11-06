@@ -42,7 +42,7 @@
  * For debug purposes this app enters flash
  * mode when the reRun button is pressed.
  */
-#define FLASHMODE false
+#define FLASHMODE true
 
 /**
  * Monitor the Genertator run state either from
@@ -152,18 +152,21 @@ void printLog(const char *format , ...)
     static char lines[MAX_LINES][MAX_CHAR+1];
     if (FirstLogline == true) {
         for (int i=0; i <MAX_LINES; i++) {
-            memset(lines[i], 0x0, MAX_CHAR+1);
+            memset(lines[i], 0, MAX_CHAR);
         }
 
         FirstLogline = false;
     }
 
-    // Notify any remote client
-    atprintf("%s\r\n", buf);
+    buf[MAX_CHAR-1] = '\0';
+    int blenght = (int)strlen(buf);
+
+    // To stdio serial also
+    printf("%s\r\n", buf);
 
     for (curLine=0; curLine <MAX_LINES; curLine++) {
         if (lines[curLine][0] == (unsigned char)0x0) {
-            strncpy(lines[curLine], buf, MAX_CHAR);
+            strncpy(lines[curLine], buf, blenght < MAX_CHAR? blenght: MAX_CHAR);
             break;
         }
 
@@ -173,7 +176,7 @@ void printLog(const char *format , ...)
             for (curLine=1; curLine <MAX_LINES; curLine++) {
                 strncpy(lines[curLine-1], lines[curLine], MAX_CHAR);
             }
-            strncpy(lines[MAX_LINES-1], buf, MAX_CHAR);
+            strncpy(lines[MAX_LINES-1], buf, blenght < MAX_CHAR? blenght: MAX_CHAR);
         }
     }
 
@@ -531,6 +534,7 @@ static void wbekeCtrlRun(bool reRun)
     int mFact = 1;
     int reTry = 0;
     int preHeatInterval = PREHEAT_INTERVAL;
+    static char versionString[40];
 
     if (reRun == false) {
         if (initDisplay() != 0) {
@@ -548,8 +552,9 @@ static void wbekeCtrlRun(bool reRun)
     DEV_SET_PWM(DEF_PWM);
 
     // Splash screen
+    sprintf(versionString, "V%d.%d", WesterBekeCtrl_VERSION_MAJOR, WesterBekeCtrl_VERSION_MINOR);
     Paint_DrawImage(wb50bcd,0,0,240,135);
-    Paint_DrawString_EN(2, 118, VERSION , &FONT, WHITE, BLACK);
+    Paint_DrawString_EN(2, 118, versionString , &FONT, WHITE, BLACK);
     Paint_DrawString_EN(194, 118, GTYPE , &FONT, WHITE, BLACK);
     LCD_1IN14_Display(BlackImage);
 

@@ -1,10 +1,12 @@
 #ifndef _WBEKECTRL_H_
 #define _WBEKECTRL_H_
 
-/**
- * Version string in splash screen
- */
-#define VERSION "V1.0"
+#if __has_include("wbekectrl.h")
+ #include "wbekectrl.h"
+#else
+ #error Run cmake to create wbekectrl.h
+#endif
+
 #define GTYPE   "BCD"
 
 extern void printLog(const char *format , ...);
