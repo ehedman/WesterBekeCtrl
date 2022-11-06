@@ -1,0 +1,4 @@
+// the configured options and settings for WesterBeke
+#include "rtc.def"
+#define WesterBekeCtrl_VERSION_MAJOR @WesterBekeCtrl_VERSION_MAJOR@
+#define WesterBekeCtrl_VERSION_MINOR @WesterBekeCtrl_VERSION_MINOR@
